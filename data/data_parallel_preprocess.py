@@ -41,9 +41,14 @@ def split_data(
         do not shuffle the index as we will shuffle them later
     """
 
-    """TODO: Your code here"""
+    # Model-parallel major rank layout:
+    #   rank = dp_idx * mp_size + mp_idx
+    # so ranks in the same DP group share the same data shard.
+    dp_idx = rank // mp_size
+    shard_size = x_train.shape[0] // dp_size
+    start_idx = dp_idx * shard_size
+    end_idx = start_idx + shard_size
 
-    # Try to get the correct start_idx and end_idx from dp_size, mp_size and rank and return
-    # the corresponding data
-
-    raise NotImplementedError
+    split_x_train = x_train[start_idx:end_idx]
+    split_y_train = y_train[start_idx:end_idx]
+    return split_x_train, split_y_train

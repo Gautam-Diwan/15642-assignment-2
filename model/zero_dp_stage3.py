@@ -106,15 +106,21 @@ class ZeroDPStage3FCLayer(object):
                 the number of elements in each shard **including padding**.
         """
 
-        """TODO: Your code here"""
+        flat_tensor = tensor.reshape(-1)
+        numel = flat_tensor.size
+        shard_size = (numel + num_shards - 1) // num_shards
+        padded_numel = shard_size * num_shards
 
-        # Hint: You need to handle the case when tensor.numel() is not divisible by 
-        # num_shards by padding zeros at the end of the flattened tensor before 
-        # partitioning. The returned shard should INCLUDE the padded elements.
-        # We keep track of the original shard_size (without padding) for
-        # later use in communication.
+        if padded_numel > numel:
+            padded_flat = np.zeros(padded_numel, dtype=flat_tensor.dtype)
+            padded_flat[:numel] = flat_tensor
+        else:
+            padded_flat = flat_tensor
 
-        return (np.empty(8), 8)
+        start = shard_idx * shard_size
+        end = start + shard_size
+        tensor_shard = padded_flat[start:end].copy()
+        return tensor_shard, shard_size
 
     def zero_grad(self):
         self.grad_w_shard = np.zeros_like(self.w_shard)
@@ -141,10 +147,19 @@ class ZeroDPStage3FCLayer(object):
         """
         self.x = x
 
-        """TODO: Your code here"""
+        gathered_w = np.empty((self.dp_size, self.w_shard_size), dtype=self.w_shard.dtype)
+        self.comm.Allgather(self.w_shard, gathered_w)
+        full_w_flat = gathered_w.reshape(-1)[: self.w_numel]
+        full_w = full_w_flat.reshape(self.in_dim, self.out_dim)
 
+        gathered_b = np.empty((self.dp_size, self.b_shard_size), dtype=self.b_shard.dtype)
+        self.comm.Allgather(self.b_shard, gathered_b)
+        full_b_flat = gathered_b.reshape(-1)[: self.b_numel]
+        full_b = full_b_flat.reshape(1, self.out_dim)
 
-        raise NotImplementedError
+        out = x @ full_w
+        out = out + np.broadcast_to(full_b, out.shape)
+        return out
 
     def backward(self, output_grad: np.ndarray) -> List[np.ndarray]:
         """Backward pass under ZeRO-DP Stage 3.
@@ -178,9 +193,32 @@ class ZeroDPStage3FCLayer(object):
             these attributes for the optimizer step.
         """
 
-        """TODO: Your code here"""
+        gathered_w = np.empty((self.dp_size, self.w_shard_size), dtype=self.w_shard.dtype)
+        self.comm.Allgather(self.w_shard, gathered_w)
+        full_w_flat = gathered_w.reshape(-1)[: self.w_numel]
+        full_w = full_w_flat.reshape(self.in_dim, self.out_dim)
 
-        raise NotImplementedError
+        grad_w_full = self.x.T @ output_grad
+        grad_b_full = np.sum(output_grad, axis=0, keepdims=True)
+
+        grad_w_flat = grad_w_full.reshape(-1)
+        grad_b_flat = grad_b_full.reshape(-1)
+
+        padded_grad_w = np.zeros(self.w_shard_size * self.dp_size, dtype=grad_w_flat.dtype)
+        padded_grad_b = np.zeros(self.b_shard_size * self.dp_size, dtype=grad_b_flat.dtype)
+        padded_grad_w[: self.w_numel] = grad_w_flat
+        padded_grad_b[: self.b_numel] = grad_b_flat
+
+        reduced_grad_w_shard = np.empty_like(self.grad_w_shard)
+        reduced_grad_b_shard = np.empty_like(self.grad_b_shard)
+        self.comm.Reduce_scatter(padded_grad_w, reduced_grad_w_shard)
+        self.comm.Reduce_scatter(padded_grad_b, reduced_grad_b_shard)
+
+        self.grad_w_shard[...] = reduced_grad_w_shard
+        self.grad_b_shard[...] = reduced_grad_b_shard
+
+        grad_x = output_grad @ full_w.T
+        return [grad_x]
 
 
 class ZeroDPMLPModel(object):
@@ -314,6 +352,15 @@ class ZeroDPAdam(object):
                     "v": np.zeros_like(param),
                 }
 
-            """TODO: Your code here"""
+            m = self.state[key]["m"]
+            v = self.state[key]["v"]
 
-        raise NotImplementedError
+            m *= self.beta1
+            m += (1.0 - self.beta1) * grad
+
+            v *= self.beta2
+            v += (1.0 - self.beta2) * (grad * grad)
+
+            m_hat = m / (1.0 - self.beta1 ** self.step_idx)
+            v_hat = v / (1.0 - self.beta2 ** self.step_idx)
+            param -= self.lr * m_hat / (np.sqrt(v_hat) + self.eps)

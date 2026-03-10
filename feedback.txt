@@ -1,0 +1,3 @@
+Possible improvements:
+I know Modal joined later as a sponsor but it will be great if there can be more transparency on the grading process so that it is agnostic of local development environment and/or GHC machines.
+For example: Modal actually does not allow mpirun to be done without an allow root flag.
